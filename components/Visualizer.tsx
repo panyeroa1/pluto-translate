@@ -8,8 +8,6 @@ interface VisualizerProps {
 
 const Visualizer: React.FC<VisualizerProps> = ({ analyser, active }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  // Fixed: useRef expects 1 argument (initial value). 
-  // Line 11 error fix: providing undefined as initial value.
   const animationRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
@@ -42,7 +40,8 @@ const Visualizer: React.FC<VisualizerProps> = ({ analyser, active }) => {
       for (let i = 0; i < bufferLength; i++) {
         barHeight = (dataArray[i] / 255) * canvas.height;
 
-        ctx.fillStyle = `rgb(16, 185, 129)`; // Emerald-500
+        // Orange brand color for bars
+        ctx.fillStyle = `rgb(249, 115, 22)`; 
         ctx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
 
         x += barWidth + 1;

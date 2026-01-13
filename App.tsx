@@ -16,6 +16,7 @@ const App: React.FC = () => {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isProcessingTTS, setIsProcessingTTS] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState(false);
+  const [quotaWait, setQuotaWait] = useState<number>(0);
   
   const sessionRef = useRef<any>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -25,6 +26,9 @@ const App: React.FC = () => {
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   const currentChunkRef = useRef('');
   const scrollRef = useRef<HTMLDivElement>(null);
+  const ttsQueueRef = useRef<string[]>([]);
+
+  const isHost = mode === 'SOURCE';
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -134,9 +138,9 @@ const App: React.FC = () => {
         config: {
           responseModalities: [Modality.AUDIO],
           inputAudioTranscription: {},
-          systemInstruction: `You are the host of "${classId}". 
-          Auto-detect the language spoken and provide verbatim transcription. 
-          Do not translate. Output ONLY the transcription chunks.`,
+          systemInstruction: `You are the Host of the class session "${classId}". 
+          Your role is to capture audio and provide a live, highly accurate transcription of the lecture.
+          Auto-detect the language spoken. Output ONLY the raw transcription chunks via the audio transcription channel.`,
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } }
           }
@@ -168,22 +172,21 @@ const App: React.FC = () => {
     });
 
     if (segment.isFinal && segment.text.trim()) {
-      await processTranslationAndSpeech(segment.text);
+      processTranslationAndSpeech(segment.text);
     }
   };
 
-  const processTranslationAndSpeech = async (originalText: string) => {
+  const processTranslationAndSpeech = async (originalText: string, retryCount = 0) => {
+    if (isProcessingTTS && retryCount === 0) {
+      ttsQueueRef.current.push(originalText);
+      return;
+    }
+
     setIsProcessingTTS(true);
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const targetLangObj = LANGUAGES.find(l => l.code === targetLanguage);
       const langName = targetLangObj?.name || targetLanguage;
-
-      const translateResponse = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
-        contents: `Translate to ${langName}. Return ONLY translated text: "${originalText}"`,
-      });
-      const translatedText = translateResponse.text?.trim() || originalText;
 
       if (!outputAudioContextRef.current) {
         outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
@@ -191,7 +194,7 @@ const App: React.FC = () => {
       
       const ttsResponse = await ai.models.generateContent({
         model: "gemini-2.5-flash-preview-tts",
-        contents: [{ parts: [{ text: `Speak in ${langName}: ${translatedText}` }] }],
+        contents: [{ parts: [{ text: `Translate precisely and then speak ONLY the translated text in ${langName}: ${originalText}` }] }],
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
@@ -210,15 +213,39 @@ const App: React.FC = () => {
         const audioSource = ctx.createBufferSource();
         audioSource.buffer = buffer;
         audioSource.connect(ctx.destination);
-        audioSource.addEventListener('ended', () => sourcesRef.current.delete(audioSource));
+        audioSource.addEventListener('ended', () => {
+          sourcesRef.current.delete(audioSource);
+          checkQueue();
+        });
         audioSource.start(nextStartTimeRef.current);
         nextStartTimeRef.current += buffer.duration;
         sourcesRef.current.add(audioSource);
+      } else {
+        checkQueue();
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('TTS/Translation failed:', err);
+      if (err?.message?.includes('429') || err?.status === 'RESOURCE_EXHAUSTED') {
+        const waitTime = 10000;
+        setQuotaWait(waitTime / 1000);
+        const timer = setInterval(() => setQuotaWait(p => Math.max(0, p - 1)), 1000);
+        setTimeout(() => {
+          clearInterval(timer);
+          setQuotaWait(0);
+          processTranslationAndSpeech(originalText, retryCount + 1);
+        }, waitTime);
+      } else {
+        checkQueue();
+      }
     } finally {
       setIsProcessingTTS(false);
+    }
+  };
+
+  const checkQueue = () => {
+    if (ttsQueueRef.current.length > 0) {
+      const next = ttsQueueRef.current.shift();
+      if (next) processTranslationAndSpeech(next);
     }
   };
 
@@ -232,33 +259,39 @@ const App: React.FC = () => {
   }, [mode, classId, targetLanguage]);
 
   return (
-    <div className="flex flex-col h-screen max-w-md mx-auto bg-black text-white font-sans overflow-hidden">
-      <div className={`absolute inset-0 transition-opacity duration-1000 pointer-events-none opacity-10 ${(isSpeaking || isProcessingTTS) ? 'bg-orange-500/30' : 'bg-transparent'}`} 
+    <div className="flex flex-col h-screen max-w-md mx-auto bg-black text-white font-sans overflow-hidden transition-colors duration-1000">
+      {/* Background Aura specialized by Role */}
+      <div className={`absolute inset-0 transition-opacity duration-1000 pointer-events-none opacity-20 ${isHost ? 'bg-orange-600/10' : 'bg-blue-600/10'}`} 
            style={{ filter: 'blur(120px)' }} />
+      {isSpeaking && isHost && (
+        <div className="absolute top-0 left-0 right-0 h-1 bg-orange-500 shadow-[0_0_15px_#f97316] z-50 animate-pulse" />
+      )}
 
       <header className="px-6 pt-10 pb-4 z-20">
         <div className="flex justify-between items-start">
-          <div>
-            <h1 className="text-3xl font-black tracking-tighter text-white uppercase italic">Success Class</h1>
-            <div className="flex items-center gap-2 mt-1">
-              <p className="text-orange-500 font-bold text-[10px] tracking-[0.2em] uppercase">Intelligence Node</p>
-              <span className={`px-2 py-0.5 rounded-full text-[8px] font-black uppercase tracking-widest ${mode === 'SOURCE' ? 'bg-orange-600 text-white shadow-[0_0_10px_rgba(234,88,12,0.4)]' : 'bg-blue-600 text-white shadow-[0_0_10px_rgba(37,99,235,0.4)]'}`}>
-                {mode === 'SOURCE' ? 'Role: Host' : 'Role: Participant'}
+          <div className="flex flex-col">
+            <h1 className="text-3xl font-black tracking-tighter text-white uppercase italic leading-none">Success Class</h1>
+            <div className="flex items-center gap-2 mt-2">
+              <span className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all duration-500 border ${isHost ? 'bg-orange-600/20 text-orange-400 border-orange-500/30' : 'bg-blue-600/20 text-blue-400 border-blue-500/30'}`}>
+                <div className={`w-1.5 h-1.5 rounded-full animate-pulse ${isHost ? 'bg-orange-500' : 'bg-blue-500'}`} />
+                {isHost ? 'Host Command' : 'Participant View'}
               </span>
             </div>
           </div>
-          <div className="flex items-center bg-zinc-900/90 backdrop-blur border border-zinc-800 rounded-full px-3 py-1 shadow-2xl">
-             <div className={`w-2 h-2 rounded-full mr-2 transition-all duration-300 ${status === ConnectionStatus.CONNECTED ? 'bg-emerald-500 shadow-[0_0_8px_#10b981]' : (mode === 'RECEIVER' ? 'bg-blue-500 shadow-[0_0_8px_#3b82f6]' : 'bg-zinc-700')}`} />
-             <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-tighter">
-                {mode === 'RECEIVER' ? 'Sync' : status}
-             </span>
+          <div className="flex flex-col items-end gap-1">
+             <div className="flex items-center bg-zinc-900/90 backdrop-blur border border-zinc-800 rounded-full px-3 py-1.5 shadow-2xl">
+               <div className={`w-2 h-2 rounded-full mr-2 transition-all duration-300 ${status === ConnectionStatus.CONNECTED ? 'bg-emerald-500 shadow-[0_0_8px_#10b981]' : (mode === 'RECEIVER' ? 'bg-blue-500' : 'bg-zinc-700')}`} />
+               <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-tighter">
+                  {status === ConnectionStatus.CONNECTED ? 'LIVE' : status}
+               </span>
+             </div>
           </div>
         </div>
         
         <div className="mt-6 flex gap-2">
-          <div className="flex-1 p-3 bg-zinc-900/80 backdrop-blur border border-zinc-800 rounded-2xl flex flex-col group transition-all">
+          <div className={`flex-1 p-3 bg-zinc-900/80 backdrop-blur border rounded-2xl flex flex-col group transition-all duration-500 ${isHost ? 'border-zinc-800' : 'border-blue-900/30'}`}>
             <span className="text-zinc-500 text-[8px] font-bold uppercase tracking-widest mb-1">
-              {mode === 'SOURCE' ? 'Your Class Channel' : 'Join Class Channel'}
+              {isHost ? 'Your Session ID' : 'Target Session ID'}
             </span>
             <div className="flex items-center justify-between">
               <input 
@@ -266,9 +299,9 @@ const App: React.FC = () => {
                 onChange={handleClassIdChange}
                 placeholder="CHANNEL-ID"
                 disabled={status === ConnectionStatus.CONNECTED}
-                className="bg-transparent border-none p-0 text-xl font-mono font-black focus:ring-0 text-white w-full uppercase placeholder:text-zinc-800"
+                className={`bg-transparent border-none p-0 text-xl font-mono font-black focus:ring-0 w-full uppercase placeholder:text-zinc-800 transition-colors ${!isHost ? 'text-blue-100' : 'text-white'}`}
               />
-              <button onClick={copyToClipboard} className={`transition-all ${copyFeedback ? 'text-emerald-500 scale-110' : 'text-zinc-600 hover:text-orange-500'}`}>
+              <button onClick={copyToClipboard} className={`transition-all ${copyFeedback ? 'text-emerald-500 scale-110' : (isHost ? 'text-zinc-600 hover:text-orange-500' : 'text-zinc-600 hover:text-blue-500')}`}>
                 {copyFeedback ? (
                   <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
                     <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
@@ -282,13 +315,13 @@ const App: React.FC = () => {
             </div>
           </div>
 
-          {mode === 'RECEIVER' && (
-            <div className="w-1/3 p-3 bg-zinc-900/80 backdrop-blur border border-zinc-800 rounded-2xl flex flex-col transition-all">
-              <span className="text-zinc-500 text-[8px] font-bold uppercase tracking-widest mb-1 truncate">Translate To</span>
+          {!isHost && (
+            <div className="w-1/3 p-3 bg-zinc-900/80 backdrop-blur border border-blue-900/40 rounded-2xl flex flex-col transition-all">
+              <span className="text-blue-500/60 text-[8px] font-bold uppercase tracking-widest mb-1 truncate">Translate To</span>
               <select
                 value={targetLanguage}
                 onChange={(e) => setTargetLanguage(e.target.value)}
-                className="bg-transparent border-none p-0 text-xs font-bold focus:ring-0 text-orange-500 w-full appearance-none overflow-hidden text-ellipsis"
+                className="bg-transparent border-none p-0 text-xs font-bold focus:ring-0 text-blue-400 w-full appearance-none overflow-hidden text-ellipsis cursor-pointer"
               >
                 {LANGUAGES.map(l => (
                   <option key={l.code} value={l.code} className="bg-zinc-900 text-white">{l.name}</option>
@@ -300,31 +333,43 @@ const App: React.FC = () => {
       </header>
 
       <div className="px-6 py-2 z-20">
-        <div className="flex p-1 bg-zinc-900/50 backdrop-blur rounded-xl border border-zinc-800 shadow-lg">
+        <div className="flex p-1 bg-zinc-900/50 backdrop-blur rounded-xl border border-zinc-800 shadow-lg relative">
           <button
             onClick={() => { setMode('SOURCE'); stopBroadcasting(); }}
-            className={`flex-1 py-2 text-[10px] font-black uppercase tracking-[0.2em] rounded-lg transition-all ${mode === 'SOURCE' ? 'bg-orange-600 text-white shadow-lg shadow-orange-900/30' : 'text-zinc-500 hover:text-zinc-300'}`}
+            className={`flex-1 py-2.5 text-[10px] font-black uppercase tracking-[0.2em] rounded-lg transition-all duration-300 z-10 ${isHost ? 'text-white' : 'text-zinc-500 hover:text-zinc-300'}`}
           >
-            Broadcaster
+            Host Role
           </button>
           <button
             onClick={() => { setMode('RECEIVER'); stopBroadcasting(); }}
-            className={`flex-1 py-2 text-[10px] font-black uppercase tracking-[0.2em] rounded-lg transition-all ${mode === 'RECEIVER' ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/30' : 'text-zinc-500 hover:text-zinc-300'}`}
+            className={`flex-1 py-2.5 text-[10px] font-black uppercase tracking-[0.2em] rounded-lg transition-all duration-300 z-10 ${!isHost ? 'text-white' : 'text-zinc-500 hover:text-zinc-300'}`}
           >
-            Receiver
+            Participant Role
           </button>
+          <div className={`absolute top-1 bottom-1 left-1 w-[calc(50%-4px)] transition-all duration-500 ease-out rounded-lg shadow-xl ${isHost ? 'bg-orange-600 translate-x-0' : 'bg-blue-600 translate-x-full'}`} />
         </div>
       </div>
 
       <main className="flex-1 overflow-hidden flex flex-col p-6 z-10">
-        <div className={`flex-1 bg-zinc-900/20 border-2 rounded-[2.5rem] flex flex-col relative overflow-hidden backdrop-blur-md transition-all duration-700 ${isSpeaking ? 'border-orange-500/40 shadow-[0_0_50px_rgba(249,115,22,0.1)]' : 'border-zinc-800/50'}`}>
+        <div className={`flex-1 bg-zinc-950/40 border-2 rounded-[2.5rem] flex flex-col relative overflow-hidden backdrop-blur-md transition-all duration-1000 ${isHost ? (isSpeaking ? 'border-orange-500/60 shadow-[0_0_70px_rgba(249,115,22,0.15)]' : 'border-orange-900/20') : (status === ConnectionStatus.CONNECTED ? 'border-blue-500/40 shadow-[0_0_70px_rgba(37,99,235,0.15)]' : 'border-blue-900/20')}`}>
           
-          <div className="absolute top-0 left-0 right-0 p-6 flex justify-between items-center z-20 bg-gradient-to-b from-black/80 via-black/20 to-transparent pointer-events-none">
-            <span className="text-[8px] font-black text-zinc-500 uppercase tracking-[0.3em]">{mode === 'SOURCE' ? 'Host Signal Capture' : 'Network Stream Listening'}</span>
+          <div className="absolute top-0 left-0 right-0 p-6 flex justify-between items-center z-20 bg-gradient-to-b from-black/95 via-black/40 to-transparent pointer-events-none">
+            <div className="flex items-center gap-2">
+               <span className={`text-[8px] font-black uppercase tracking-[0.3em] ${isHost ? 'text-orange-500/80' : 'text-blue-500/80'}`}>
+                {isHost ? 'BROADCASTING FROM MIC' : 'SYNCED TO CLOUD STREAM'}
+              </span>
+            </div>
             <div className="flex gap-2">
-              {isProcessingTTS && (
-                <div className="flex items-center bg-emerald-500/20 border border-emerald-500/40 px-3 py-1 rounded-full animate-pulse shadow-[0_0_15px_rgba(16,185,129,0.2)]">
-                  <span className="text-[8px] font-black text-emerald-500 tracking-widest uppercase">TTS Engine Active</span>
+              {quotaWait > 0 && (
+                <div className="flex items-center bg-red-500/20 border border-red-500/40 px-3 py-1 rounded-full animate-pulse">
+                  <span className="text-[8px] font-black text-red-500 tracking-widest uppercase">Quota Wait: {Math.round(quotaWait)}s</span>
+                </div>
+              )}
+              {isProcessingTTS && quotaWait === 0 && (
+                <div className={`flex items-center px-3 py-1 rounded-full animate-pulse border transition-colors ${isHost ? 'bg-emerald-500/20 border-emerald-500/40' : 'bg-blue-500/20 border-blue-500/40'}`}>
+                  <span className={`text-[8px] font-black tracking-widest uppercase ${isHost ? 'text-emerald-500' : 'text-blue-400'}`}>
+                    {isHost ? 'HOST TTS ACTIVE' : 'VOICING TRANSLATION'}
+                  </span>
                 </div>
               )}
             </div>
@@ -332,22 +377,22 @@ const App: React.FC = () => {
 
           <div ref={scrollRef} className="flex-1 overflow-y-auto p-8 space-y-12 pt-28 pb-32 scrollbar-hide transcription-gradient-mask">
             {transcriptions.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center opacity-40">
+              <div className="h-full flex flex-col items-center justify-center opacity-30">
                 <div className="relative">
-                   <div className={`w-24 h-24 border-2 border-zinc-800 rounded-full flex items-center justify-center transition-all duration-700 ${status === ConnectionStatus.CONNECTED ? (mode === 'SOURCE' ? 'border-orange-500/50' : 'border-blue-500/50') + ' scale-110 shadow-lg' : ''}`}>
-                      <svg xmlns="http://www.w3.org/2000/svg" className={`h-10 w-10 transition-colors duration-500 ${status === ConnectionStatus.CONNECTED ? (mode === 'SOURCE' ? 'text-orange-500' : 'text-blue-500') : 'text-zinc-800'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                   <div className={`w-28 h-28 border-2 rounded-full flex items-center justify-center transition-all duration-1000 ${status === ConnectionStatus.CONNECTED ? (isHost ? 'border-orange-500 scale-110 shadow-[0_0_30px_rgba(249,115,22,0.3)]' : 'border-blue-500 scale-110 shadow-[0_0_30px_rgba(37,99,235,0.3)]') : 'border-zinc-800'}`}>
+                      <svg xmlns="http://www.w3.org/2000/svg" className={`h-12 w-12 transition-colors duration-700 ${status === ConnectionStatus.CONNECTED ? (isHost ? 'text-orange-500' : 'text-blue-500') : 'text-zinc-800'}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
                       </svg>
                    </div>
                 </div>
-                <p className="mt-8 text-[11px] font-black tracking-[0.4em] uppercase text-zinc-700 text-center px-12 leading-relaxed">
-                  {mode === 'SOURCE' ? 'Host, begin your session to capture audio' : 'Participant, awaiting transcription from host'}
+                <p className={`mt-10 text-[10px] font-black tracking-[0.5em] uppercase text-center px-12 leading-loose transition-colors duration-500 ${isHost ? 'text-orange-900' : 'text-blue-900'}`}>
+                  {isHost ? 'Initialize Host Session to Broadcast' : 'Awaiting Participant Sync Signal'}
                 </p>
               </div>
             ) : (
               transcriptions.map((s, idx) => (
                 <div key={s.id + idx} className={`animate-segment-pop group`}>
-                   <p className={`text-2xl font-black leading-tight tracking-tight transition-all duration-700 ${s.isFinal ? 'text-zinc-100' : 'text-orange-500/80 animate-pulse font-medium'}`}>
+                   <p className={`text-2xl leading-tight tracking-tight transition-all duration-700 ${s.isFinal ? 'text-zinc-100 font-black opacity-100 drop-shadow-[0_2px_10px_rgba(0,0,0,0.8)]' : (isHost ? 'text-orange-500/80' : 'text-blue-400/80') + ' animate-pulse font-medium italic opacity-60'}`}>
                       {s.text.trim()}
                    </p>
                 </div>
@@ -355,9 +400,9 @@ const App: React.FC = () => {
             )}
           </div>
 
-          {mode === 'SOURCE' && (
+          {isHost && (
             <div className="absolute bottom-6 left-6 right-6">
-               <div className="rounded-[2.5rem] overflow-hidden border border-zinc-800/60 shadow-2xl bg-black/80 backdrop-blur">
+               <div className="rounded-[2.5rem] overflow-hidden border border-orange-900/30 shadow-2xl bg-black/80 backdrop-blur">
                  <Visualizer active={status === ConnectionStatus.CONNECTED} analyser={analyserRef.current || undefined} />
                </div>
             </div>
@@ -366,31 +411,37 @@ const App: React.FC = () => {
       </main>
 
       <footer className="px-10 pb-12 pt-4 z-20">
-        {mode === 'SOURCE' ? (
+        {isHost ? (
           status === ConnectionStatus.CONNECTED ? (
             <button onClick={stopBroadcasting} className="group relative w-full h-18 rounded-3xl overflow-hidden active:scale-95 transition-all">
-              <div className="absolute inset-0 bg-zinc-900 border-2 border-zinc-800 group-hover:bg-zinc-800 transition-colors" />
-              <span className="relative z-10 text-[11px] font-black uppercase tracking-[0.4em] text-white">Stop Hosting</span>
+              <div className="absolute inset-0 bg-zinc-900 border-2 border-orange-900/40 group-hover:bg-zinc-800 transition-colors" />
+              <span className="relative z-10 text-[11px] font-black uppercase tracking-[0.4em] text-orange-500">Terminate Host Control</span>
             </button>
           ) : (
             <button onClick={startBroadcasting} disabled={status === ConnectionStatus.CONNECTING} className="group relative w-full h-18 rounded-3xl overflow-hidden active:scale-95 transition-all disabled:opacity-50">
-              <div className="absolute inset-0 bg-orange-600 group-hover:bg-orange-500 transition-colors shadow-[0_20px_40px_rgba(234,88,12,0.25)]" />
+              <div className="absolute inset-0 bg-orange-600 group-hover:bg-orange-500 transition-colors shadow-[0_20px_50px_rgba(234,88,12,0.3)]" />
               <span className="relative z-10 flex items-center justify-center gap-4 text-[11px] font-black uppercase tracking-[0.4em] text-white">
                 {status === ConnectionStatus.CONNECTING && <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" />}
-                {status === ConnectionStatus.CONNECTING ? 'Calibrating...' : 'Start Broadcast'}
+                {status === ConnectionStatus.CONNECTING ? 'Configuring Host...' : 'Launch Session'}
               </span>
             </button>
           )
         ) : (
-           <div className="h-18 flex items-center justify-between bg-zinc-900/90 backdrop-blur-2xl border border-zinc-800/80 px-8 rounded-3xl shadow-xl">
+           <div className={`h-18 flex items-center justify-between bg-zinc-900/90 backdrop-blur-2xl border px-8 rounded-3xl shadow-xl transition-all duration-500 ${status === ConnectionStatus.CONNECTED ? 'border-blue-500/40 shadow-blue-900/20' : 'border-zinc-800'}`}>
               <div className="flex flex-col">
-                <span className="text-[8px] font-black text-zinc-600 uppercase tracking-widest mb-1">Socket Signal</span>
-                <span className="text-[10px] font-black text-blue-500 uppercase tracking-tight">Participant Listening Active</span>
+                <span className={`text-[8px] font-black uppercase tracking-widest mb-1 ${status === ConnectionStatus.CONNECTED ? 'text-blue-500' : 'text-zinc-600'}`}>Network Link Status</span>
+                <span className={`text-[10px] font-black uppercase tracking-tight ${status === ConnectionStatus.CONNECTED ? 'text-white' : 'text-zinc-700'}`}>
+                  {status === ConnectionStatus.CONNECTED ? 'Participant Receiving' : 'Sync Offline'}
+                </span>
               </div>
               <div className="flex gap-2 h-5 items-center">
-                {[1,2,3,4,5].map(i => (
-                  <div key={i} className={`w-1 rounded-full bg-blue-500/40 animate-bounce`} 
-                       style={{ animationDelay: `${i * 0.1}s`, height: `${30 + (Math.random() * 70)}%`, animationDuration: '0.8s' }} />
+                {[1,2,3,4,5,6,7].map(i => (
+                  <div key={i} className={`w-1 rounded-full transition-all duration-500 ${status === ConnectionStatus.CONNECTED ? 'bg-blue-500/60 animate-bounce' : 'bg-zinc-800'}`} 
+                       style={{ 
+                         animationDelay: `${i * 0.1}s`, 
+                         height: status === ConnectionStatus.CONNECTED ? `${30 + (Math.random() * 70)}%` : '15%',
+                         animationDuration: '0.8s' 
+                       }} />
                 ))}
               </div>
            </div>
