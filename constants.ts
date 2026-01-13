@@ -11,10 +11,14 @@ export const COLORS = {
 };
 
 export const LANGUAGES = [
-  { code: 'nl-BE', name: 'Dutch (Belgium/Flemish)' },
-  { code: 'en-US', name: 'English (US)' },
-  { code: 'es-ES', name: 'Spanish (Spain)' },
+  { code: 'nl-BE', name: 'Flemish (Belgium)' },
+  { code: 'nl-NL', name: 'Dutch (Netherlands)' },
+  { code: 'fr-CI', name: 'French (Ivory Coast)' },
   { code: 'fr-FR', name: 'French (France)' },
-  { code: 'de-DE', name: 'German (Germany)' },
-  { code: 'ja-JP', name: 'Japanese' },
+  { code: 'tl-PH', name: 'Tagalog (Philippines)' },
+  { code: 'ceb-PH', name: 'Cebuano (Philippines)' },
+  { code: 'hil-PH', name: 'Hiligaynon (Philippines)' },
+  { code: 'ilo-PH', name: 'Ilocano (Philippines)' },
+  { code: 'en-US', name: 'English (US)' },
+  { code: 'en-GB', name: 'English (UK)' },
 ];
