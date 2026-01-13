@@ -1,0 +1,7 @@
+{
+  "name": "Success Class Translator",
+  "description": "A high-performance live transcription and translation app powered by Gemini 2.5 Live and Supabase Realtime.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
